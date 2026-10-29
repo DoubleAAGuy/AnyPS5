@@ -46,6 +46,27 @@ static const std::uint8_t PALETTE_1BIT_ADAM7[] = {
     0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
 };
 
+static const std::uint8_t PALETTE_ADAM7[] = {
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x05, 0x02, 0x03, 0x00, 0x00, 0x01, 0x87, 0x06, 0xFE,
+    0xE0, 0x00, 0x00, 0x00, 0x0C, 0x50, 0x4C, 0x54, 0x45, 0xFF, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00,
+    0x00, 0xFF, 0xFF, 0xFF, 0x00, 0xD6, 0x02, 0x8F, 0x7B, 0x00, 0x00, 0x00, 0x20, 0x49, 0x44, 0x41,
+    0x54, 0x78, 0x9C, 0x63, 0x60, 0x60, 0x64, 0x60, 0x62, 0x60, 0x6E, 0x60, 0x61, 0x60, 0x51, 0x60,
+    0x28, 0x60, 0x2C, 0x60, 0x62, 0x60, 0xDC, 0x78, 0x9E, 0x89, 0x81, 0x01, 0x00, 0x1A, 0xBB, 0x03,
+    0x15, 0x95, 0x41, 0xFC, 0xE9, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60,
+    0x82,
+};
+
+static const std::uint8_t PALETTE_8BIT[] = {
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x08, 0x03, 0x00, 0x00, 0x00, 0xC3, 0xFC, 0x8F,
+    0xB8, 0x00, 0x00, 0x00, 0x06, 0x50, 0x4C, 0x54, 0x45, 0x09, 0x08, 0x07, 0x06, 0x05, 0x04, 0x51,
+    0x58, 0xD7, 0x91, 0x00, 0x00, 0x00, 0x01, 0x74, 0x52, 0x4E, 0x53, 0x80, 0xAD, 0x5E, 0x5B, 0x46,
+    0x00, 0x00, 0x00, 0x0B, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x60, 0x64, 0x00, 0x00, 0x00,
+    0x05, 0x00, 0x02, 0xD1, 0x66, 0x33, 0x78, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+    0x42, 0x60, 0x82,
+};
+
 static const std::uint8_t GRAY16[] = {
     0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
     0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x10, 0x00, 0x00, 0x00, 0x00, 0x81, 0xD9, 0xFC,
@@ -380,6 +401,60 @@ int main() {
     Require(scePngDecDecode(handle, &decode, &info) == (2 << 16 | 2));
     Require(opaquePaletteImage == std::vector<std::uint8_t>({192, 176, 160, 255, 16, 32, 48, 255, 16, 32, 48, 255, 192, 176, 160, 255}));
     Require(info.color_space == 4 && info.bit_depth == 1 && info.image_flag == 1);
+
+    std::vector<std::uint8_t> clutImage(0x400 + 8 + 16, 0xCC);
+    decode = DecodeParam(palettePng, clutImage);
+    decode.pixel_format = 132;
+    decode.image_pitch = 4;
+    decode.image_mem_size = 0x400 + 8;
+    Require(scePngDecDecode(handle, &decode, &info) == (2 << 16 | 2));
+    const std::array<std::uint8_t, 16> clutPalette = {255, 0, 0, 255, 0, 255, 0, 0, 0, 0, 255, 255, 255, 255, 0, 128};
+    Require(std::equal(clutPalette.begin(), clutPalette.end(), clutImage.begin()));
+    Require(std::all_of(clutImage.begin() + clutPalette.size(), clutImage.begin() + 0x400, [](std::uint8_t byte) { return byte == 0; }));
+    Require(clutImage[0x400] == 0 && clutImage[0x401] == 1 && clutImage[0x402] == 0xCC && clutImage[0x403] == 0xCC);
+    Require(clutImage[0x404] == 2 && clutImage[0x405] == 3 && clutImage[0x406] == 0xCC && clutImage[0x407] == 0xCC);
+    Require(std::all_of(clutImage.begin() + 0x400 + 8, clutImage.end(), [](std::uint8_t byte) { return byte == 0xCC; }));
+    Require(info.color_space == 4 && info.bit_depth == 2 && info.image_flag == 2);
+
+    const std::vector<std::uint8_t> adam7PalettePng(PALETTE_ADAM7, PALETTE_ADAM7 + sizeof(PALETTE_ADAM7));
+    std::vector<std::uint8_t> adam7Clut(0x400 + 25, 0xCC);
+    decode = DecodeParam(adam7PalettePng, adam7Clut);
+    decode.pixel_format = 132;
+    decode.image_mem_size = static_cast<std::uint32_t>(adam7Clut.size());
+    Require(scePngDecDecode(handle, &decode, &info) == (5 << 16 | 5));
+    const std::array<std::uint8_t, 25> adam7Indices = {0, 1, 2, 3, 0, 2, 3, 0, 1, 2, 0, 1, 2, 3, 0, 2, 3, 0, 1, 2, 0, 1, 2, 3, 0};
+    Require(std::equal(adam7Indices.begin(), adam7Indices.end(), adam7Clut.begin() + 0x400));
+    Require(info.color_space == 4 && info.bit_depth == 2 && info.image_flag == 1);
+
+    const std::vector<std::uint8_t> palette8BitPng(PALETTE_8BIT, PALETTE_8BIT + sizeof(PALETTE_8BIT));
+    std::vector<std::uint8_t> palette8BitClut(0x400 + 2, 0xCC);
+    decode = DecodeParam(palette8BitPng, palette8BitClut);
+    decode.pixel_format = 132;
+    decode.image_mem_size = static_cast<std::uint32_t>(palette8BitClut.size());
+    Require(scePngDecDecode(handle, &decode, &info) == (2 << 16 | 1));
+    const std::array<std::uint8_t, 8> palette8BitRgba = {9, 8, 7, 128, 6, 5, 4, 255};
+    Require(std::equal(palette8BitRgba.begin(), palette8BitRgba.end(), palette8BitClut.begin()));
+    Require(palette8BitClut[0x400] == 1 && palette8BitClut[0x401] == 0);
+
+    std::fill(clutImage.begin(), clutImage.end(), 0xCC);
+    decode = DecodeParam(palettePng, clutImage);
+    decode.pixel_format = 132;
+    decode.image_mem_size = 0x400 + 3;
+    Require(scePngDecDecode(handle, &decode, &info) == invalidSize);
+    Require(std::all_of(clutImage.begin(), clutImage.end(), [](std::uint8_t byte) { return byte == 0xCC; }));
+    decode.image_pitch = 1;
+    decode.image_mem_size = 0x400 + 4;
+    Require(scePngDecDecode(handle, &decode, &info) == invalidParam);
+    Require(std::all_of(clutImage.begin(), clutImage.end(), [](std::uint8_t byte) { return byte == 0xCC; }));
+    decode.image_pitch = 4;
+    decode.image_mem_size = 0x400 + 7;
+    Require(scePngDecDecode(handle, &decode, &info) == invalidParam);
+    Require(std::all_of(clutImage.begin(), clutImage.end(), [](std::uint8_t byte) { return byte == 0xCC; }));
+    decode = DecodeParam(rgbPng, clutImage);
+    decode.pixel_format = 132;
+    decode.image_mem_size = 0x400 + 6;
+    Require(scePngDecDecode(handle, &decode, &info) == invalidParam);
+    Require(std::all_of(clutImage.begin(), clutImage.end(), [](std::uint8_t byte) { return byte == 0xCC; }));
 
     const std::vector<std::uint8_t> gray16Png(GRAY16, GRAY16 + sizeof(GRAY16));
     std::vector<std::uint8_t> gray16Image(2 * 4, 0xCC);

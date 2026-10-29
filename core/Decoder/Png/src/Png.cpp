@@ -5,6 +5,7 @@
 #include <climits>
 #include <cstddef>
 #include <cstdlib>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 
@@ -93,6 +94,76 @@ bool isValidFormat(std::uint8_t bitDepth, std::uint8_t colorType) {
         return false;
     }
 }
+
+struct PaletteChunks {
+    std::vector<std::uint8_t> entries;
+    std::vector<std::uint8_t> transparency;
+    std::vector<std::uint8_t> compressed;
+};
+
+int paethPredictor(int left, int up, int upLeft);
+
+std::optional<PaletteChunks> readPaletteChunks(std::span<const std::uint8_t> png) {
+    if (png.size() < SIGNATURE.size() || !std::equal(SIGNATURE.begin(), SIGNATURE.end(), png.begin())) return std::nullopt;
+    PaletteChunks chunks;
+    bool havePalette = false;
+    bool haveTransparency = false;
+    bool inImageData = false;
+    bool endedImageData = false;
+    std::size_t offset = SIGNATURE.size();
+    while (png.size() - offset >= CHUNK_OVERHEAD) {
+        const std::uint32_t length = readBigEndian32(&png[offset]);
+        const std::uint8_t* type = &png[offset + 4];
+        if (length > png.size() - offset - CHUNK_OVERHEAD) return std::nullopt;
+        const std::uint8_t* data = &png[offset + 8];
+        if (isChunkType(type, "PLTE")) {
+            if (havePalette || inImageData || length == 0 || length > 768 || length % 3 != 0) return std::nullopt;
+            chunks.entries.assign(data, data + length);
+            havePalette = true;
+        } else if (isChunkType(type, "tRNS")) {
+            if (haveTransparency || inImageData || !havePalette || length > chunks.entries.size() / 3) return std::nullopt;
+            chunks.transparency.assign(data, data + length);
+            haveTransparency = true;
+        } else if (isChunkType(type, "IDAT")) {
+            if (endedImageData) return std::nullopt;
+            inImageData = true;
+            chunks.compressed.insert(chunks.compressed.end(), data, data + length);
+        } else {
+            if (inImageData) endedImageData = true;
+            if (isChunkType(type, "IEND")) break;
+        }
+        offset += CHUNK_OVERHEAD + length;
+    }
+    if (!havePalette || !inImageData || chunks.compressed.empty()) return std::nullopt;
+    return chunks;
+}
+
+std::uint64_t passDimension(std::uint32_t size, std::uint32_t start, std::uint32_t step) {
+    return size <= start ? 0 : (static_cast<std::uint64_t>(size) - start + step - 1) / step;
+}
+
+bool unfilterRow(std::uint8_t* row, const std::uint8_t* previous, std::size_t size, std::uint8_t filter) {
+    if (filter > 4) return false;
+    for (std::size_t i = 0; i < size; ++i) {
+        const std::uint8_t left = i == 0 ? 0 : row[i - 1];
+        const std::uint8_t up = previous == nullptr ? 0 : previous[i];
+        const std::uint8_t upLeft = previous == nullptr || i == 0 ? 0 : previous[i - 1];
+        std::uint8_t predictor = 0;
+        if (filter == 1) predictor = left;
+        else if (filter == 2) predictor = up;
+        else if (filter == 3) predictor = static_cast<std::uint8_t>((static_cast<unsigned>(left) + up) / 2);
+        else if (filter == 4) predictor = static_cast<std::uint8_t>(paethPredictor(left, up, upLeft));
+        row[i] = static_cast<std::uint8_t>(row[i] + predictor);
+    }
+    return true;
+}
+
+struct Adam7Pass {
+    std::uint32_t startX;
+    std::uint32_t startY;
+    std::uint32_t stepX;
+    std::uint32_t stepY;
+};
 
 void appendBigEndian32(std::vector<std::uint8_t>& output, std::uint32_t value) {
     for (int shift = 24; shift >= 0; shift -= 8) output.push_back(static_cast<std::uint8_t>(value >> shift));
@@ -191,6 +262,84 @@ std::optional<Image> Decode(std::span<const std::uint8_t> png) {
     image.pixels.assign(decoded.get(), decoded.get() + static_cast<std::size_t>(image.width) * image.height * 4);
     const std::optional<Header> header = ParseHeader(png);
     if (header.has_value()) repairGrayscaleTransparency(*header, png, image);
+    return image;
+}
+
+std::optional<IndexedImage> DecodeIndexed(std::span<const std::uint8_t> png) {
+    const std::optional<Header> header = ParseHeader(png);
+    if (!header || header->colorType != ColorType::Palette || header->bitDepth > 8) return std::nullopt;
+    const std::optional<PaletteChunks> chunks = readPaletteChunks(png);
+    if (!chunks || chunks->compressed.size() > static_cast<std::size_t>(INT_MAX)) return std::nullopt;
+    const std::size_t paletteEntries = chunks->entries.size() / 3;
+    if (paletteEntries > (std::size_t{1} << header->bitDepth)) return std::nullopt;
+
+    constexpr std::array<Adam7Pass, 7> Adam7Passes{{
+        {0, 0, 8, 8}, {4, 0, 8, 8}, {0, 4, 4, 8}, {2, 0, 4, 4}, {0, 2, 2, 4}, {1, 0, 2, 2}, {0, 1, 1, 2},
+    }};
+    constexpr Adam7Pass NonInterlacedPass{0, 0, 1, 1};
+    std::uint64_t uncompressedSize = 0;
+    const auto addPassSize = [&](const Adam7Pass& pass) {
+        const std::uint64_t width = passDimension(header->width, pass.startX, pass.stepX);
+        const std::uint64_t height = passDimension(header->height, pass.startY, pass.stepY);
+        const std::uint64_t rowSize = (width * header->bitDepth + 7) / 8;
+        uncompressedSize += height * (rowSize + 1);
+        return uncompressedSize <= INT_MAX;
+    };
+    if (header->interlaced) {
+        for (const auto& pass : Adam7Passes)
+            if (!addPassSize(pass)) return std::nullopt;
+    } else if (!addPassSize(NonInterlacedPass)) {
+        return std::nullopt;
+    }
+
+    const std::uint64_t pixelCount = static_cast<std::uint64_t>(header->width) * header->height;
+    if (pixelCount > std::numeric_limits<std::size_t>::max()) return std::nullopt;
+    int decodedSize = 0;
+    std::unique_ptr<char, void (*)(void*)> decoded(stbi_zlib_decode_malloc(
+        reinterpret_cast<const char*>(chunks->compressed.data()), static_cast<int>(chunks->compressed.size()), &decodedSize), stbi_image_free);
+    if (!decoded || decodedSize != static_cast<int>(uncompressedSize)) return std::nullopt;
+
+    IndexedImage image{header->width, header->height, std::vector<std::uint8_t>(1024), std::vector<std::uint8_t>(static_cast<std::size_t>(pixelCount))};
+    for (std::size_t index = 0; index < paletteEntries; ++index) {
+        image.palette[index * 4] = chunks->entries[index * 3];
+        image.palette[index * 4 + 1] = chunks->entries[index * 3 + 1];
+        image.palette[index * 4 + 2] = chunks->entries[index * 3 + 2];
+        image.palette[index * 4 + 3] = index < chunks->transparency.size() ? chunks->transparency[index] : 0xFF;
+    }
+
+    std::size_t compressedOffset = 0;
+    const auto decodePass = [&](const Adam7Pass& pass) {
+        const std::uint32_t passWidth = static_cast<std::uint32_t>(passDimension(header->width, pass.startX, pass.stepX));
+        const std::uint32_t passHeight = static_cast<std::uint32_t>(passDimension(header->height, pass.startY, pass.stepY));
+        if (passWidth == 0 || passHeight == 0) return true;
+        const std::size_t rowSize = (static_cast<std::size_t>(passWidth) * header->bitDepth + 7) / 8;
+        std::vector<std::uint8_t> row(rowSize);
+        std::vector<std::uint8_t> previous(rowSize);
+        const std::uint8_t mask = static_cast<std::uint8_t>((1u << header->bitDepth) - 1);
+        for (std::uint32_t y = 0; y < passHeight; ++y) {
+            const auto* source = reinterpret_cast<const std::uint8_t*>(decoded.get()) + compressedOffset;
+            const std::uint8_t filter = source[0];
+            std::copy_n(source + 1, rowSize, row.begin());
+            compressedOffset += rowSize + 1;
+            if (!unfilterRow(row.data(), y == 0 ? nullptr : previous.data(), rowSize, filter)) return false;
+            for (std::uint32_t x = 0; x < passWidth; ++x) {
+                const std::uint64_t bitOffset = static_cast<std::uint64_t>(x) * header->bitDepth;
+                const std::uint8_t index = static_cast<std::uint8_t>((row[bitOffset / 8] >> (8 - header->bitDepth - bitOffset % 8)) & mask);
+                if (index >= paletteEntries) return false;
+                const std::uint32_t destinationX = pass.startX + x * pass.stepX;
+                const std::uint32_t destinationY = pass.startY + y * pass.stepY;
+                image.indices[static_cast<std::size_t>(destinationY) * image.width + destinationX] = index;
+            }
+            std::swap(row, previous);
+        }
+        return true;
+    };
+    if (header->interlaced) {
+        for (const auto& pass : Adam7Passes)
+            if (!decodePass(pass)) return std::nullopt;
+    } else if (!decodePass(NonInterlacedPass)) {
+        return std::nullopt;
+    }
     return image;
 }
 
