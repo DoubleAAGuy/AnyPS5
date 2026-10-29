@@ -27,6 +27,7 @@ constexpr std::int32_t SCE_PNG_DEC_ERROR_INVALID_PARAM = static_cast<std::int32_
 constexpr std::int32_t SCE_PNG_DEC_ERROR_INVALID_HANDLE = static_cast<std::int32_t>(0x80690004);
 constexpr std::int32_t SCE_PNG_DEC_ERROR_INVALID_WORK_MEMORY = static_cast<std::int32_t>(0x80690005);
 constexpr std::int32_t SCE_PNG_DEC_ERROR_INVALID_DATA = static_cast<std::int32_t>(0x80690010);
+constexpr std::int32_t SCE_PNG_DEC_ERROR_UNSUPPORTED = static_cast<std::int32_t>(0x80690011);
 constexpr std::int32_t SCE_PNG_DEC_ERROR_DECODE_ERROR = static_cast<std::int32_t>(0x80690012);
 
 constexpr std::uint32_t ATTRIBUTE_NONE = 0;
@@ -37,6 +38,7 @@ constexpr std::uintptr_t HANDLE_ALIGNMENT = 16;
 
 constexpr std::uint16_t PIXEL_FORMAT_R8G8B8A8 = 0;
 constexpr std::uint16_t PIXEL_FORMAT_B8G8R8A8 = 1;
+constexpr std::uint16_t PIXEL_FORMAT_CLUT = 132;
 
 constexpr std::uint16_t COLOR_SPACE_GRAYSCALE = 2;
 constexpr std::uint16_t COLOR_SPACE_RGB = 3;
@@ -355,8 +357,7 @@ int32_t APS5_VABI scePngDecDecode(void* handle, const PngDecDecodeParam* param, 
     if (!param) return SCE_PNG_DEC_ERROR_INVALID_ADDR;
     if (!param->png_mem_addr || !param->image_mem_addr || (reinterpret_cast<std::uintptr_t>(param->image_mem_addr) & 3u) != 0) return SCE_PNG_DEC_ERROR_INVALID_ADDR;
     if (param->png_mem_size == 0 || param->image_mem_size == 0) return SCE_PNG_DEC_ERROR_INVALID_SIZE;
-    if (param->pixel_format == 132) throw std::runtime_error("scePngDecDecode: pixel format 132 is not implemented");
-    if (param->pixel_format != PIXEL_FORMAT_R8G8B8A8 && param->pixel_format != PIXEL_FORMAT_B8G8R8A8) return SCE_PNG_DEC_ERROR_INVALID_PARAM;
+    if (param->pixel_format != PIXEL_FORMAT_R8G8B8A8 && param->pixel_format != PIXEL_FORMAT_B8G8R8A8 && param->pixel_format != PIXEL_FORMAT_CLUT) return SCE_PNG_DEC_ERROR_INVALID_PARAM;
     if (param->alpha_value > 0xFF) return SCE_PNG_DEC_ERROR_INVALID_PARAM;
 
     const ChunkScan scan = scanChunks(toBytes(param->png_mem_addr, param->png_mem_size));
@@ -367,6 +368,33 @@ int32_t APS5_VABI scePngDecDecode(void* handle, const PngDecDecodeParam* param, 
     if (imageInfo) fillImageInfo(*header, imageInfo);
     const bool packedDimensions = header->width <= MAX_PACKED_DIMENSION && header->height <= MAX_PACKED_DIMENSION;
     if (!imageInfo && !packedDimensions) return SCE_PNG_DEC_ERROR_INVALID_ADDR;
+    if (param->pixel_format == PIXEL_FORMAT_CLUT) {
+        const std::uint64_t rowSize = header->width;
+        std::uint64_t pitch = rowSize;
+        if (param->image_pitch != 0) {
+            pitch = param->image_pitch;
+            if (pitch < rowSize) return SCE_PNG_DEC_ERROR_INVALID_PARAM;
+            const std::uint64_t total = static_cast<std::uint64_t>(header->height) * pitch;
+            if (total > 0x7FFFFBFFull || total + 0x400 > param->image_mem_size) return SCE_PNG_DEC_ERROR_INVALID_PARAM;
+        } else {
+            const std::uint64_t total = static_cast<std::uint64_t>(header->height) * rowSize;
+            if (total + 0x400 > param->image_mem_size) return SCE_PNG_DEC_ERROR_INVALID_SIZE;
+            if (total >= 0x7FFFFC00ull) return SCE_PNG_DEC_ERROR_UNSUPPORTED;
+        }
+        const std::uint64_t alignedWidth = (static_cast<std::uint64_t>(header->width) + 7u) & ~std::uint64_t{7u};
+        const std::uint64_t alignedMaxWidth = (static_cast<std::uint64_t>(context->maxImageWidth) + 7u) & ~std::uint64_t{7u};
+        if (alignedWidth > alignedMaxWidth) return SCE_PNG_DEC_ERROR_INVALID_WORK_MEMORY;
+        if (header->bitDepth > (8u << (context->attribute & 31u))) return SCE_PNG_DEC_ERROR_INVALID_WORK_MEMORY;
+        if (header->colorType != Decoder::Png::ColorType::Palette || header->bitDepth > 8) return SCE_PNG_DEC_ERROR_INVALID_PARAM;
+        const std::optional<Decoder::Png::IndexedImage> image = Decoder::Png::DecodeIndexed(png);
+        if (!image || image->width != header->width || image->height != header->height) return SCE_PNG_DEC_ERROR_DECODE_ERROR;
+        auto* output = static_cast<std::uint8_t*>(param->image_mem_addr);
+        std::memcpy(output, image->palette.data(), image->palette.size());
+        for (std::uint32_t y = 0; y < image->height; ++y)
+            std::memcpy(output + 0x400 + y * pitch, image->indices.data() + static_cast<std::size_t>(y) * image->width, image->width);
+        if (!packedDimensions) return 0;
+        return static_cast<std::int32_t>(header->width << 16 | header->height);
+    }
     const std::uint64_t rowSize = static_cast<std::uint64_t>(header->width) * BYTES_PER_PIXEL;
     const std::uint64_t pitch = param->image_pitch == 0 ? rowSize : param->image_pitch;
     if (param->image_pitch != 0 && (pitch < rowSize || (pitch & 3u) != 0)) return SCE_PNG_DEC_ERROR_INVALID_PARAM;
