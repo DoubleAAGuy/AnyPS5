@@ -1,6 +1,7 @@
 #include "Decoder/Png.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <optional>
@@ -112,6 +113,72 @@ static std::vector<std::uint8_t> ZlibStore(std::span<const std::uint8_t> bytes) 
     output.insert(output.end(), bytes.begin(), bytes.end());
     AppendBigEndian32(output, Adler32(bytes));
     return output;
+}
+
+static int TestPaeth(int left, int up, int diagonal) {
+    const int estimate = left + up - diagonal;
+    const int a = std::abs(estimate - left);
+    const int b = std::abs(estimate - up);
+    const int c = std::abs(estimate - diagonal);
+    return a <= b && a <= c ? left : b <= c ? up : diagonal;
+}
+
+static void CheckIndexedImages() {
+    constexpr std::array<std::array<std::uint32_t, 4>, 7> adam7{{
+        {0, 0, 8, 8}, {4, 0, 8, 8}, {0, 4, 4, 8}, {2, 0, 4, 4}, {0, 2, 2, 4}, {1, 0, 2, 2}, {0, 1, 1, 2},
+    }};
+    constexpr std::array<std::array<std::uint32_t, 4>, 1> ordinary{{{0, 0, 1, 1}}};
+    for (const std::uint8_t depth : {1, 2, 4, 8}) {
+        for (const std::uint32_t width : {1, 2, 3, 5, 8, 9, 17}) {
+            for (const std::uint32_t height : {1, 2, 3, 7, 16}) {
+                for (const bool interlaced : {false, true}) {
+                    std::vector<std::uint8_t> indices(width * height);
+                    for (std::uint32_t y = 0; y < height; ++y)
+                        for (std::uint32_t x = 0; x < width; ++x)
+                            indices[y * width + x] = static_cast<std::uint8_t>((x * 19 + y * 53) & ((1u << depth) - 1));
+                    std::vector<std::uint8_t> raw;
+                    const std::span<const std::array<std::uint32_t, 4>> passes = interlaced
+                        ? std::span<const std::array<std::uint32_t, 4>>(adam7) : std::span<const std::array<std::uint32_t, 4>>(ordinary);
+                    std::uint32_t rowNumber = 0;
+                    for (const auto& pass : passes) {
+                        if (pass[0] >= width || pass[1] >= height) continue;
+                        const std::uint32_t passWidth = (width - pass[0] + pass[2] - 1) / pass[2];
+                        std::vector<std::uint8_t> previous((passWidth * depth + 7) / 8, 0);
+                        for (std::uint32_t y = pass[1]; y < height; y += pass[3]) {
+                            std::vector<std::uint8_t> row(previous.size(), 0);
+                            for (std::uint32_t i = 0; i < passWidth; ++i) {
+                                const std::uint32_t bit = i * depth;
+                                row[bit / 8] |= static_cast<std::uint8_t>(indices[y * width + pass[0] + i * pass[2]] << (8 - depth - bit % 8));
+                            }
+                            const auto filter = static_cast<std::uint8_t>((rowNumber++) % 5);
+                            raw.push_back(filter);
+                            for (std::size_t i = 0; i < row.size(); ++i) {
+                                const int left = i ? row[i - 1] : 0;
+                                const int up = previous[i];
+                                const int diagonal = i ? previous[i - 1] : 0;
+                                const std::array<int, 5> predictor{0, left, up, (left + up) / 2, TestPaeth(left, up, diagonal)};
+                                raw.push_back(static_cast<std::uint8_t>(row[i] - predictor[filter]));
+                            }
+                            previous = std::move(row);
+                        }
+                    }
+                    std::vector<std::uint8_t> ihdr;
+                    AppendBigEndian32(ihdr, width);
+                    AppendBigEndian32(ihdr, height);
+                    ihdr.insert(ihdr.end(), {depth, 3, 0, 0, static_cast<std::uint8_t>(interlaced)});
+                    std::vector<std::uint8_t> palette((1u << depth) * 3);
+                    for (std::size_t i = 0; i < palette.size(); ++i) palette[i] = static_cast<std::uint8_t>(i * 7);
+                    std::vector<std::uint8_t> png(PNG_SIGNATURE, PNG_SIGNATURE + sizeof(PNG_SIGNATURE));
+                    AppendTestChunk(png, "IHDR", ihdr);
+                    AppendTestChunk(png, "PLTE", palette);
+                    AppendTestChunk(png, "IDAT", ZlibStore(raw));
+                    AppendTestChunk(png, "IEND", {});
+                    const auto result = Decoder::Png::DecodeIndexed(png);
+                    Require(result.has_value() && result->width == width && result->height == height && result->indices == indices);
+                }
+            }
+        }
+    }
 }
 
 static std::vector<std::uint8_t> GrayLowBitPng(std::uint8_t bitDepth, std::span<const std::uint8_t> samples,
@@ -279,6 +346,7 @@ static void RequireFilterSets(std::uint32_t channels) {
 }
 
 int main() {
+    CheckIndexedImages();
     RequireRoundTrip(1, Decoder::Png::ColorType::Grayscale);
     RequireRoundTrip(2, Decoder::Png::ColorType::GrayscaleAlpha);
     RequireRoundTrip(3, Decoder::Png::ColorType::Rgb);
