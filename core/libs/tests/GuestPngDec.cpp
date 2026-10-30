@@ -521,6 +521,7 @@ int main() {
     const PngDecParseParam parsePalette{PALETTE_TRNS, sizeof(PALETTE_TRNS), 0};
     Require(scePngDecParseHeader(&parsePalette, &info) == 0);
     Require(info.color_space == 4 && info.bit_depth == 2 && info.image_flag == 2);
+
     for (const std::uint32_t size : {69u, 71u, 73u, 80u}) {
         const PngDecParseParam truncatedPalette{PALETTE_TRNS, size, 0};
         Require(scePngDecParseHeader(&truncatedPalette, &info) == decodeError);
@@ -635,6 +636,16 @@ int main() {
     Require(clutImage[0x404] == 2 && clutImage[0x405] == 3 && clutImage[0x406] == 0xCC && clutImage[0x407] == 0xCC);
     Require(std::all_of(clutImage.begin() + 0x400 + 8, clutImage.end(), [](std::uint8_t byte) { return byte == 0xCC; }));
     Require(info.color_space == 4 && info.bit_depth == 2 && info.image_flag == 2);
+
+    std::vector<std::uint8_t> badEndCrc = palettePng;
+    badEndCrc.back() ^= 1;
+    std::fill(clutImage.begin(), clutImage.end(), 0xCC);
+    decode = DecodeParam(badEndCrc, clutImage);
+    decode.pixel_format = 132;
+    decode.image_mem_size = 0x404;
+    Require(scePngDecDecode(handle, &decode, &info) == decodeError);
+    Require(std::equal(clutPalette.begin(), clutPalette.end(), clutImage.begin()));
+    Require(clutImage[0x400] == 0 && clutImage[0x401] == 1 && clutImage[0x402] == 2 && clutImage[0x403] == 3);
 
     const std::vector<std::uint8_t> adam7PalettePng(PALETTE_ADAM7, PALETTE_ADAM7 + sizeof(PALETTE_ADAM7));
     std::vector<std::uint8_t> adam7Clut(0x400 + 25, 0xCC);

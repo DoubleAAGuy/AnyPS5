@@ -1,5 +1,6 @@
 #include "prx/libScePngDec/include/Api.hpp"
 #include <algorithm>
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstddef>
@@ -189,6 +190,7 @@ std::optional<Chunk> readChunk(std::span<const std::uint8_t> png, std::size_t of
 struct ChunkScan {
     std::int32_t headerResult = 0;
     std::int32_t imageResult = 0;
+    std::uint32_t paletteEntries = 0;
     std::vector<std::uint8_t> png;
 };
 
@@ -313,6 +315,7 @@ ChunkScan scanChunks(std::span<const std::uint8_t> png) {
             if (*colorType == static_cast<std::uint8_t>(Decoder::Png::ColorType::Palette)) {
                 hasPalette = true;
                 paletteEntries = chunk->length / 3;
+                scan.paletteEntries = paletteEntries;
                 palette.assign(chunk->data.begin(), chunk->data.end());
                 palette.resize(MAX_PALETTE_SIZE);
             }
@@ -391,9 +394,11 @@ int32_t APS5_VABI scePngDecDecode(void* handle, const PngDecDecodeParam* param, 
         const std::optional<Decoder::Png::IndexedImage> image = Decoder::Png::DecodeIndexed(png);
         if (!image || image->width != header->width || image->height != header->height) return SCE_PNG_DEC_ERROR_DECODE_ERROR;
         auto* output = static_cast<std::uint8_t*>(param->image_mem_addr);
-        std::memcpy(output, image->palette.data(), image->palette.size());
+        const std::size_t paletteBytes = std::min(image->palette.size(), static_cast<std::size_t>(scan.paletteEntries) * 4);
+        std::memcpy(output, image->palette.data(), paletteBytes);
         for (std::uint32_t y = 0; y < image->height; ++y)
             std::memcpy(output + 0x400 + y * pitch, image->indices.data() + static_cast<std::size_t>(y) * image->width, image->width);
+        if (scan.imageResult != 0) return scan.imageResult;
         if (!packedDimensions) return 0;
         return static_cast<std::int32_t>(header->width << 16 | header->height);
     }
