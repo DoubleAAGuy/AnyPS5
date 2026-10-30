@@ -196,6 +196,38 @@ static void CheckIndexedImages() {
     AppendTestChunk(png, "IDAT", ZlibStore(oversizedRows));
     AppendTestChunk(png, "IEND", {});
     Require(!Decoder::Png::DecodeIndexed(png));
+
+    for (const std::uint8_t depth : {1, 2, 4, 8}) {
+        for (const std::size_t count : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{16}, std::size_t{256}}) {
+            for (const bool transparency : {false, true}) {
+                std::vector<std::uint8_t> header;
+                AppendBigEndian32(header, 2);
+                AppendBigEndian32(header, 1);
+                header.insert(header.end(), {depth, 3, 0, 0, 0});
+                std::vector<std::uint8_t> colors(count * 3);
+                for (std::size_t i = 0; i < colors.size(); ++i) colors[i] = static_cast<std::uint8_t>(i * 23);
+                std::vector<std::uint8_t> alpha(count / 2, 0x6A);
+                const std::array<std::uint8_t, 3> rows{0, 0, 0};
+                const std::size_t rowSize = 1 + (2 * depth + 7) / 8;
+                std::vector<std::uint8_t> input(PNG_SIGNATURE, PNG_SIGNATURE + sizeof(PNG_SIGNATURE));
+                AppendTestChunk(input, "IHDR", header);
+                AppendTestChunk(input, "PLTE", colors);
+                if (transparency && !alpha.empty()) AppendTestChunk(input, "tRNS", alpha);
+                AppendTestChunk(input, "IDAT", ZlibStore(std::span<const std::uint8_t>(rows.data(), rowSize)));
+                AppendTestChunk(input, "IEND", {});
+                const auto image = Decoder::Png::DecodeIndexed(input);
+                const auto written = std::min(count, std::size_t{1} << depth);
+                Require(image.has_value() && image->palette.size() == written * 4);
+                Require(image->indices == std::vector<std::uint8_t>({0, 0}));
+                for (std::size_t i = 0; i < written; ++i) {
+                    Require(image->palette[i * 4] == colors[i * 3]);
+                    Require(image->palette[i * 4 + 1] == colors[i * 3 + 1]);
+                    Require(image->palette[i * 4 + 2] == colors[i * 3 + 2]);
+                    Require(image->palette[i * 4 + 3] == (transparency && i < alpha.size() ? 0x6A : 0xFF));
+                }
+            }
+        }
+    }
 }
 
 static std::vector<std::uint8_t> GrayLowBitPng(std::uint8_t bitDepth, std::span<const std::uint8_t> samples,
