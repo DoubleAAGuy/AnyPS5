@@ -363,8 +363,10 @@ int32_t APS5_VABI scePngDecDecode(void* handle, const PngDecDecodeParam* param, 
     const ChunkScan scan = scanChunks(toBytes(param->png_mem_addr, param->png_mem_size));
     if (scan.headerResult != 0) return scan.headerResult;
     const std::span<const std::uint8_t> png = scan.png;
-    const std::optional<Decoder::Png::Header> header = Decoder::Png::ParseHeader(png);
+    std::optional<Decoder::Png::Header> header = Decoder::Png::ParseHeader(png);
     if (!header) return SCE_PNG_DEC_ERROR_INVALID_DATA;
+    if (param->pixel_format == PIXEL_FORMAT_CLUT && header->colorType == Decoder::Png::ColorType::Palette)
+        header->hasTransparency = Decoder::Png::HasPaletteTransparency(png);
     if (imageInfo) fillImageInfo(*header, imageInfo);
     const bool packedDimensions = header->width <= MAX_PACKED_DIMENSION && header->height <= MAX_PACKED_DIMENSION;
     if (!imageInfo && !packedDimensions) return SCE_PNG_DEC_ERROR_INVALID_ADDR;
