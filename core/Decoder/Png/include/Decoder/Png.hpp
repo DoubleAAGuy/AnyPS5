@@ -40,6 +40,8 @@ struct IndexedImage {
 
 std::optional<Header> ParseHeader(std::span<const std::uint8_t> png);
 
+bool HasPaletteTransparency(std::span<const std::uint8_t> png);
+
 std::optional<Image> Decode(std::span<const std::uint8_t> png);
 
 std::optional<IndexedImage> DecodeIndexed(std::span<const std::uint8_t> png);

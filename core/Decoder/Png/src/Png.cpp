@@ -121,9 +121,10 @@ std::optional<PaletteChunks> readPaletteChunks(std::span<const std::uint8_t> png
             chunks.entries.assign(data, data + length);
             havePalette = true;
         } else if (isChunkType(type, "tRNS")) {
-            if (haveTransparency || inImageData || !havePalette || length > chunks.entries.size() / 3) return std::nullopt;
-            chunks.transparency.assign(data, data + length);
-            haveTransparency = true;
+            if (!haveTransparency && !inImageData && havePalette && length != 0 && length <= chunks.entries.size() / 3) {
+                chunks.transparency.assign(data, data + length);
+                haveTransparency = true;
+            }
         } else if (isChunkType(type, "IDAT")) {
             if (endedImageData) return std::nullopt;
             inImageData = true;
@@ -265,13 +266,28 @@ std::optional<Image> Decode(std::span<const std::uint8_t> png) {
     return image;
 }
 
+bool HasPaletteTransparency(std::span<const std::uint8_t> png) {
+    if (png.size() < SIGNATURE.size() || !std::equal(SIGNATURE.begin(), SIGNATURE.end(), png.begin())) return false;
+    std::size_t paletteEntries = 0;
+    std::size_t offset = SIGNATURE.size();
+    while (png.size() - offset >= CHUNK_OVERHEAD) {
+        const std::uint32_t length = readBigEndian32(&png[offset]);
+        if (length > png.size() - offset - CHUNK_OVERHEAD) return false;
+        const std::uint8_t* type = &png[offset + 4];
+        if (isChunkType(type, "IDAT") || isChunkType(type, "IEND")) break;
+        if (isChunkType(type, "PLTE") && length > 0 && length <= 768 && length % 3 == 0) paletteEntries = length / 3;
+        if (isChunkType(type, "tRNS") && length > 0 && length <= paletteEntries) return true;
+        offset += CHUNK_OVERHEAD + length;
+    }
+    return false;
+}
+
 std::optional<IndexedImage> DecodeIndexed(std::span<const std::uint8_t> png) {
     const std::optional<Header> header = ParseHeader(png);
     if (!header || header->colorType != ColorType::Palette || header->bitDepth > 8) return std::nullopt;
     const std::optional<PaletteChunks> chunks = readPaletteChunks(png);
     if (!chunks || chunks->compressed.size() > static_cast<std::size_t>(INT_MAX)) return std::nullopt;
-    const std::size_t paletteEntries = chunks->entries.size() / 3;
-    if (paletteEntries > (std::size_t{1} << header->bitDepth)) return std::nullopt;
+    const std::size_t paletteEntries = std::min(chunks->entries.size() / 3, std::size_t{1} << header->bitDepth);
 
     constexpr std::array<Adam7Pass, 7> Adam7Passes{{
         {0, 0, 8, 8}, {4, 0, 8, 8}, {0, 4, 4, 8}, {2, 0, 4, 4}, {0, 2, 2, 4}, {1, 0, 2, 2}, {0, 1, 1, 2},
@@ -300,7 +316,7 @@ std::optional<IndexedImage> DecodeIndexed(std::span<const std::uint8_t> png) {
         reinterpret_cast<const char*>(chunks->compressed.data()), static_cast<int>(chunks->compressed.size()));
     if (decodedSize != static_cast<int>(uncompressedSize)) return std::nullopt;
 
-    IndexedImage image{header->width, header->height, std::vector<std::uint8_t>(1024), std::vector<std::uint8_t>(static_cast<std::size_t>(pixelCount))};
+    IndexedImage image{header->width, header->height, std::vector<std::uint8_t>(paletteEntries * 4), std::vector<std::uint8_t>(static_cast<std::size_t>(pixelCount))};
     for (std::size_t index = 0; index < paletteEntries; ++index) {
         image.palette[index * 4] = chunks->entries[index * 3];
         image.palette[index * 4 + 1] = chunks->entries[index * 3 + 1];
@@ -326,7 +342,6 @@ std::optional<IndexedImage> DecodeIndexed(std::span<const std::uint8_t> png) {
             for (std::uint32_t x = 0; x < passWidth; ++x) {
                 const std::uint64_t bitOffset = static_cast<std::uint64_t>(x) * header->bitDepth;
                 const std::uint8_t index = static_cast<std::uint8_t>((row[bitOffset / 8] >> (8 - header->bitDepth - bitOffset % 8)) & mask);
-                if (index >= paletteEntries) return false;
                 const std::uint32_t destinationX = pass.startX + x * pass.stepX;
                 const std::uint32_t destinationY = pass.startY + y * pass.stepY;
                 image.indices[static_cast<std::size_t>(destinationY) * image.width + destinationX] = index;
