@@ -2,6 +2,9 @@ add_library(libSceHttp SHARED EXCLUDE_FROM_ALL Export.cpp src/Options.cpp src/Pa
 target_include_directories(libSceHttp PRIVATE ${LIBS_INCLUDE_DIR})
 configure_windows_unwind(libSceHttp)
 target_link_libraries(libSceHttp PRIVATE libSceNet libSceSsl)
+if(WIN32)
+    target_link_libraries(libSceHttp PRIVATE ws2_32)
+endif()
 
 if(BUILD_TESTING)
     add_test_executable(guest_http_tests ${LIBS_INCLUDE_DIR}/tests/GuestHttp.cpp)
