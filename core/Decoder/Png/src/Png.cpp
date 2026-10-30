@@ -281,6 +281,7 @@ std::optional<IndexedImage> DecodeIndexed(std::span<const std::uint8_t> png) {
     const auto addPassSize = [&](const Adam7Pass& pass) {
         const std::uint64_t width = passDimension(header->width, pass.startX, pass.stepX);
         const std::uint64_t height = passDimension(header->height, pass.startY, pass.stepY);
+        if (width == 0 || height == 0) return true;
         const std::uint64_t rowSize = (width * header->bitDepth + 7) / 8;
         uncompressedSize += height * (rowSize + 1);
         return uncompressedSize <= INT_MAX;
@@ -294,10 +295,10 @@ std::optional<IndexedImage> DecodeIndexed(std::span<const std::uint8_t> png) {
 
     const std::uint64_t pixelCount = static_cast<std::uint64_t>(header->width) * header->height;
     if (pixelCount > std::numeric_limits<std::size_t>::max()) return std::nullopt;
-    int decodedSize = 0;
-    std::unique_ptr<char, void (*)(void*)> decoded(stbi_zlib_decode_malloc(
-        reinterpret_cast<const char*>(chunks->compressed.data()), static_cast<int>(chunks->compressed.size()), &decodedSize), stbi_image_free);
-    if (!decoded || decodedSize != static_cast<int>(uncompressedSize)) return std::nullopt;
+    std::vector<char> decoded(static_cast<std::size_t>(uncompressedSize));
+    const int decodedSize = stbi_zlib_decode_buffer(decoded.data(), static_cast<int>(decoded.size()),
+        reinterpret_cast<const char*>(chunks->compressed.data()), static_cast<int>(chunks->compressed.size()));
+    if (decodedSize != static_cast<int>(uncompressedSize)) return std::nullopt;
 
     IndexedImage image{header->width, header->height, std::vector<std::uint8_t>(1024), std::vector<std::uint8_t>(static_cast<std::size_t>(pixelCount))};
     for (std::size_t index = 0; index < paletteEntries; ++index) {
@@ -317,7 +318,7 @@ std::optional<IndexedImage> DecodeIndexed(std::span<const std::uint8_t> png) {
         std::vector<std::uint8_t> previous(rowSize);
         const std::uint8_t mask = static_cast<std::uint8_t>((1u << header->bitDepth) - 1);
         for (std::uint32_t y = 0; y < passHeight; ++y) {
-            const auto* source = reinterpret_cast<const std::uint8_t*>(decoded.get()) + compressedOffset;
+            const auto* source = reinterpret_cast<const std::uint8_t*>(decoded.data()) + compressedOffset;
             const std::uint8_t filter = source[0];
             std::copy_n(source + 1, rowSize, row.begin());
             compressedOffset += rowSize + 1;
