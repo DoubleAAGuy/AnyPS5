@@ -179,6 +179,23 @@ static void CheckIndexedImages() {
             }
         }
     }
+    for (std::size_t size = 0; size < sizeof(PALETTE_TRNS); ++size) {
+        const std::span<const std::uint8_t> prefix(PALETTE_TRNS, size);
+        const auto decoded = Decoder::Png::DecodeIndexed(prefix);
+        if (decoded) Require(decoded->indices == std::vector<std::uint8_t>({0, 1, 2, 3}));
+    }
+    std::vector<std::uint8_t> ihdr;
+    AppendBigEndian32(ihdr, 1);
+    AppendBigEndian32(ihdr, 1);
+    ihdr.insert(ihdr.end(), {8, 3, 0, 0, 0});
+    const std::array<std::uint8_t, 3> palette{0, 0, 0};
+    const std::vector<std::uint8_t> oversizedRows(4096, 0);
+    std::vector<std::uint8_t> png(PNG_SIGNATURE, PNG_SIGNATURE + sizeof(PNG_SIGNATURE));
+    AppendTestChunk(png, "IHDR", ihdr);
+    AppendTestChunk(png, "PLTE", palette);
+    AppendTestChunk(png, "IDAT", ZlibStore(oversizedRows));
+    AppendTestChunk(png, "IEND", {});
+    Require(!Decoder::Png::DecodeIndexed(png));
 }
 
 static std::vector<std::uint8_t> GrayLowBitPng(std::uint8_t bitDepth, std::span<const std::uint8_t> samples,
